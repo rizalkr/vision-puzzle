@@ -144,15 +144,19 @@ export function PointerOverlay() {
       <AnimatePresence>
         {handState.detected && (
           <>
-            {/* Trail Pool (GPU-composited via transform) */}
+            {/* Trail Pool (GPU-composited via transform, radial-gradient avoids costly blur filter passes) */}
             {TRAIL_INDICES.map((index) => (
               <div
                 key={index}
                 ref={(el) => {
                   trailRefs.current[index] = el;
                 }}
-                className="absolute top-0 left-0 rounded-full bg-cyan-200/40 blur-[2px] w-4 h-4 -ml-2 -mt-2 pointer-events-none will-change-transform"
-                style={{ opacity: 0 }}
+                className="absolute top-0 left-0 rounded-full w-5 h-5 -ml-2.5 -mt-2.5 pointer-events-none will-change-transform"
+                style={{
+                  opacity: 0,
+                  background:
+                    "radial-gradient(circle, rgba(165, 243, 252, 0.55) 0%, rgba(165, 243, 252, 0) 70%)",
+                }}
               />
             ))}
 
@@ -169,10 +173,14 @@ export function PointerOverlay() {
                 className="flex items-center justify-center relative -translate-x-1/2 -translate-y-1/2"
               >
                 <motion.div 
-                  className="rounded-full bg-cyan-400 absolute inset-0 blur-md"
+                  className="rounded-full absolute -inset-3 pointer-events-none"
+                  style={{
+                    background:
+                      "radial-gradient(circle, rgba(34, 211, 238, 0.7) 0%, rgba(34, 211, 238, 0) 70%)",
+                  }}
                   animate={{
                      scale: cursorState === "hover" ? 1.5 : cursorState === "grab" ? 1.7 : 1,
-                     opacity: cursorState === "idle" ? 0.5 : 0.8
+                     opacity: cursorState === "idle" ? 0.55 : 0.85
                   }}
                   transition={motionTokens.springs.pointer}
                 />

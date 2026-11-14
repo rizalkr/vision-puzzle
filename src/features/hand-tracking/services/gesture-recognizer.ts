@@ -31,7 +31,7 @@ export class GestureRecognizer {
     return this.state.pinching;
   }
 
-  process(handState: HandState, timestamp: number): GestureState {
+  process(handState: HandState, timestamp: number, aspectRatio = 16 / 9): GestureState {
     if (!handState.detected || handState.landmarks.length < 9) {
       if (this.state.pinching) {
         if (this.trackingLostTime === 0) {
@@ -57,28 +57,37 @@ export class GestureRecognizer {
     const hoveredPieceId = this.hitTester?.hitTest(pointer.x, pointer.y);
     const hovering = !!hoveredPieceId;
 
-    // Landmark 4: Thumb tip, Landmark 8: Index tip
+    // Landmark 4: Thumb tip, Landmark 8: Index tip, Landmark 0: Wrist, Landmark 9: Middle MCP
     const thumb = handState.landmarks[4];
     const index = handState.landmarks[8];
-    const dx = thumb.x - index.x;
+    const wrist = handState.landmarks[0];
+    const middleMcp = handState.landmarks[9];
+
+    // Compensate X for video aspect ratio so distances are isotropic regardless of hand tilt
+    const dx = (thumb.x - index.x) * aspectRatio;
     const dy = thumb.y - index.y;
-    // Normalized distance
     const distance = Math.sqrt(dx * dx + dy * dy);
+
+    const palmSize =
+      wrist && middleMcp
+        ? Math.max(0.05, Math.hypot((middleMcp.x - wrist.x) * aspectRatio, middleMcp.y - wrist.y))
+        : 0.2;
+    const pinchRatio = distance / palmSize;
     
     let { phase, pinching } = this.state;
-    const DEBOUNCE_MS = 60;
 
     // Pinch Hysteresis
-    if (!this.isPhysicallyPinching && distance < InteractionConfig.pinchStartDistance) {
+    if (!this.isPhysicallyPinching && pinchRatio < InteractionConfig.pinchStartRatio) {
       this.pinchStartTime = timestamp;
       this.isPhysicallyPinching = true;
-    } else if (this.isPhysicallyPinching && distance > InteractionConfig.pinchEndDistance) {
+    } else if (this.isPhysicallyPinching && pinchRatio > InteractionConfig.pinchEndRatio) {
       this.pinchEndTime = timestamp;
       this.isPhysicallyPinching = false;
     }
 
     if (this.isPhysicallyPinching && !pinching) {
-      if (timestamp - this.pinchStartTime >= DEBOUNCE_MS) {
+      const isDeepPinch = pinchRatio < InteractionConfig.pinchInstantRatio;
+      if (isDeepPinch || timestamp - this.pinchStartTime >= InteractionConfig.pinchDebounceMs) {
         pinching = true;
         phase = "pinch-start";
         trackingDiagnostics.recordPinchStart();

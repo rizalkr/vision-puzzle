@@ -119,7 +119,7 @@ export function InteractionDispatcher() {
         if (targetSurface) {
           targetSurface.callbacks.onPress?.(x, y);
         }
-      } else if (gestureState.phase === "pinch-end" && isPinching.current) {
+      } else if ((gestureState.phase === "pinch-end" || !gestureState.pinching) && isPinching.current) {
         isPinching.current = false;
         if (targetSurface) {
           targetSurface.callbacks.onRelease?.();

@@ -30,27 +30,35 @@ export function PuzzleBoard({ pieces, sourceImage, difficulty }: PuzzleBoardProp
   }, [selectedPieceId]);
 
   const [hoveredPieceId, setHoveredPieceId] = React.useState<string | null>(null);
+  const hoveredPieceIdRef = React.useRef<string | null>(null);
+
+  React.useEffect(() => {
+    hoveredPieceIdRef.current = hoveredPieceId;
+  }, [hoveredPieceId]);
 
   // Evaluate hovered piece via high-frequency pointer subscription and only commit when ID changes
   React.useEffect(() => {
     if (isComplete || pieces.length === 0) {
       // eslint-disable-next-line react-hooks/set-state-in-effect
       setHoveredPieceId(null);
+      hoveredPieceIdRef.current = null;
       return;
     }
 
     const evaluateHover = (state: { x: number; y: number; phase: string }) => {
       if (state.phase === "hidden") {
+        hoveredPieceIdRef.current = null;
         setHoveredPieceId((prev) => (prev === null ? prev : null));
         return;
       }
       const nextHovered = interactionAssist.hitTest(state.x, state.y) ?? null;
+      hoveredPieceIdRef.current = nextHovered;
       setHoveredPieceId((prev) => (prev === nextHovered ? prev : nextHovered));
     };
 
     evaluateHover(getPointerState());
     return subscribePointer(evaluateHover);
-  }, [isComplete, pieces.length, subscribePointer, getPointerState]);
+  }, [isComplete, pieces, subscribePointer, getPointerState]);
 
   const isAutoSelecting =
     pointerState.source === "hand" &&
@@ -126,7 +134,8 @@ export function PuzzleBoard({ pieces, sourceImage, difficulty }: PuzzleBoardProp
              const pointerX = x ?? state.x;
              const pointerY = y ?? state.y;
              
-             const hitTestHoveredId = interactionAssist.hitTest(pointerX, pointerY);
+             const hitTestHoveredId =
+               interactionAssist.hitTest(pointerX, pointerY) ?? hoveredPieceIdRef.current;
 
              if (hitTestHoveredId) {
                if (state.source === "hand" && currentSelectedId === null) {

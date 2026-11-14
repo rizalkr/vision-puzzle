@@ -10,6 +10,7 @@ import { InteractionConfig } from "../constants/interaction-config";
 import { useHandTrackingDiagnostics } from "../store/hand-tracking-diagnostics-store";
 import { FpsTracker } from "../services/fps-tracker";
 import { trackingDiagnostics } from "../services/diagnostics-service";
+import type { HandTrackingResultPayload } from "../workers/hand-tracking.worker";
 import type { HandState } from "../types/hand-state";
 import type { GestureState, HitTester, NormalizedPointerEvent } from "../types/gesture-state";
 
@@ -20,6 +21,17 @@ interface HandTrackingContextType {
   registerGestureCallbacks: (onEvent: (e: NormalizedPointerEvent) => void, hitTester: HitTester) => void;
   subscribeFrame: (listener: (hand: HandState, gesture: GestureState) => void) => () => void;
 }
+
+interface VideoFrameMetadataLike {
+  presentationTime: number;
+}
+
+type VideoWithRVFC = HTMLVideoElement & {
+  requestVideoFrameCallback?: (
+    callback: (now: number, metadata: VideoFrameMetadataLike) => void
+  ) => number;
+  cancelVideoFrameCallback?: (handle: number) => void;
+};
 
 const initialHandState: HandState = {
   detected: false,
@@ -45,15 +57,14 @@ export function HandTrackingProvider({ children }: { children: React.ReactNode }
   const [gestureState, setGestureState] = useState<GestureState>(initialGestureState);
   
   const animationFrameRef = useRef<number | null>(null);
+  const videoFrameHandleRef = useRef<number | null>(null);
   const pointerSmoothing = useRef(new PointerSmoothing());
   const gestureRecognizer = useRef(new GestureRecognizer());
   const confidenceFilter = useRef(new HandTrackingConfidenceFilter());
   const inferenceFpsTracker = useRef(new FpsTracker());
   const lastDetectedTime = useRef<number>(0);
   const lastValidState = useRef<HandState | null>(null);
-  const latestRawPointerRef = useRef<{ x: number; y: number } | null>(null);
   const lastVideoTimeRef = useRef<number>(-1);
-  const lastRafTimeRef = useRef<number>(0);
   const isInPersistenceRef = useRef<boolean>(false);
   const cameraDiagnosticsRecordedRef = useRef<boolean>(false);
 
@@ -123,7 +134,7 @@ export function HandTrackingProvider({ children }: { children: React.ReactNode }
   useEffect(() => {
     if (!isReady) return;
 
-    const video = camera.getVideoElement();
+    const video = camera.getVideoElement() as VideoWithRVFC | null;
     if (!video) return;
 
     const recordCameraDiagnostics = () => {
@@ -154,13 +165,10 @@ export function HandTrackingProvider({ children }: { children: React.ReactNode }
       
       if (lastValidState.current && timeSinceLastDetection < InteractionConfig.trackingPersistenceMs) {
         isInPersistenceRef.current = true;
-        const gState = gestureRecognizer.current.process(lastValidState.current, now);
-        publishFrame(lastValidState.current, gState);
       } else {
         trackingDiagnostics.recordTrackingLoss(reason);
         pointerSmoothing.current.reset();
         confidenceFilter.current.reset();
-        latestRawPointerRef.current = null;
         isInPersistenceRef.current = false;
         const emptyState = { ...initialHandState, detected: false };
         lastValidState.current = null;
@@ -169,106 +177,131 @@ export function HandTrackingProvider({ children }: { children: React.ReactNode }
       }
     };
 
-    const loop = () => {
+    const handleInferenceResult = (result: HandTrackingResultPayload | null) => {
       const now = performance.now();
-      const rafDt = lastRafTimeRef.current > 0 ? now - lastRafTimeRef.current : 16.6667;
-      lastRafTimeRef.current = now;
 
-      if (video.readyState >= 2 && video.videoWidth > 0 && video.videoHeight > 0) {
-        recordCameraDiagnostics();
-
-        const hasNewVideoFrame = video.currentTime !== lastVideoTimeRef.current;
-
-        if (hasNewVideoFrame) {
-          lastVideoTimeRef.current = video.currentTime;
-          const result = handTrackingService.detectForVideo(video, now);
-          const t1 = performance.now();
-          
-          inferenceFpsTracker.current.recordFrame(t1);
-          if (inferenceFpsTracker.current.shouldUpdateStore(t1)) {
-            const metrics = inferenceFpsTracker.current.getMetrics();
-            if (metrics) {
-              useHandTrackingDiagnostics.getState().setInferenceFps(metrics);
-            }
-          }
-          
-          if (result && result.landmarks && result.landmarks.length > 0) {
-            const rawLandmarks = result.landmarks[0];
-            const landmarks = confidenceFilter.current.filter(rawLandmarks, now);
-            
-            if (landmarks) {
-              const handedness = (result.handedness[0]?.[0]?.categoryName === "Left" ? "left" : "right") as "left" | "right";
-              const confidence = result.handedness[0]?.[0]?.score ?? 0;
-              
-              trackingDiagnostics.recordConfidence(confidence);
-              trackingDiagnostics.recordTrackingRecovery();
-              
-              // Smart Pointer Position
-              // Landmark 4: Thumb tip, Landmark 8: Index tip
-              const indexFingertip = landmarks[8];
-              const thumbFingertip = landmarks[4];
-              
-              const isPinching = gestureRecognizer.current.getIsPinching();
-              
-              let rawX: number;
-              let rawY: number;
-              if (isPinching) {
-                rawX = 1 - (indexFingertip.x + thumbFingertip.x) / 2;
-                rawY = (indexFingertip.y + thumbFingertip.y) / 2;
-              } else {
-                rawX = 1 - indexFingertip.x;
-                rawY = indexFingertip.y;
-              }
-              
-              latestRawPointerRef.current = { x: rawX, y: rawY };
-              isInPersistenceRef.current = false;
-              const smoothed = pointerSmoothing.current.smooth(rawX, rawY, rafDt);
-
-              const newState: HandState = {
-                detected: true,
-                pointer: smoothed,
-                landmarks,
-                handedness,
-                confidence,
-                pinch: false,
-              };
-              
-              lastDetectedTime.current = now;
-              lastValidState.current = newState;
-
-              const gState = gestureRecognizer.current.process(newState, now);
-              publishFrame(newState, gState);
-            } else {
-              handleMissingFrame("Impossible landmark jump (Confidence Filter)", now);
-            }
-          } else {
-            handleMissingFrame("No landmarks detected", now);
-          }
-        } else if (lastValidState.current && latestRawPointerRef.current && !isInPersistenceRef.current) {
-          // Interpolate smoothing at display refresh rate between 30fps camera frames
-          const smoothed = pointerSmoothing.current.smooth(
-            latestRawPointerRef.current.x,
-            latestRawPointerRef.current.y,
-            rafDt
-          );
-          const interpolatedState: HandState = {
-            ...lastValidState.current,
-            pointer: smoothed,
-          };
-          lastValidState.current = interpolatedState;
-          const gState = gestureRecognizer.current.process(interpolatedState, now);
-          publishFrame(interpolatedState, gState);
+      inferenceFpsTracker.current.recordFrame(now);
+      if (inferenceFpsTracker.current.shouldUpdateStore(now)) {
+        const metrics = inferenceFpsTracker.current.getMetrics();
+        if (metrics) {
+          useHandTrackingDiagnostics.getState().setInferenceFps(metrics);
         }
       }
-      
-      animationFrameRef.current = requestAnimationFrame(loop);
+
+      if (result && result.landmarks && result.landmarks.length > 0) {
+        const rawLandmarks = result.landmarks[0];
+        const landmarks = confidenceFilter.current.filter(rawLandmarks, now);
+        
+        if (landmarks) {
+          const handedness = (result.handedness[0]?.[0]?.categoryName === "Left" ? "left" : "right") as "left" | "right";
+          const confidence = result.handedness[0]?.[0]?.score ?? 0;
+          
+          trackingDiagnostics.recordConfidence(confidence);
+          trackingDiagnostics.recordTrackingRecovery();
+          
+          // Smart Pointer Position: Landmark 4 (Thumb tip), Landmark 8 (Index tip)
+          const indexFingertip = landmarks[8];
+          const thumbFingertip = landmarks[4];
+          const isPinching = gestureRecognizer.current.getIsPinching();
+          
+          let rawX: number;
+          let rawY: number;
+          if (isPinching) {
+            rawX = 1 - (indexFingertip.x + thumbFingertip.x) / 2;
+            rawY = (indexFingertip.y + thumbFingertip.y) / 2;
+          } else {
+            rawX = 1 - indexFingertip.x;
+            rawY = indexFingertip.y;
+          }
+          
+          isInPersistenceRef.current = false;
+          const smoothed = pointerSmoothing.current.updateTarget(rawX, rawY, now);
+
+          const newState: HandState = {
+            detected: true,
+            pointer: smoothed,
+            landmarks,
+            handedness,
+            confidence,
+            pinch: false,
+          };
+          
+          lastDetectedTime.current = now;
+          lastValidState.current = newState;
+
+          const aspectRatio =
+            video.videoWidth > 0 && video.videoHeight > 0
+              ? video.videoWidth / video.videoHeight
+              : 16 / 9;
+          const gState = gestureRecognizer.current.process(newState, now, aspectRatio);
+          publishFrame(newState, gState);
+        } else {
+          handleMissingFrame("Impossible landmark jump (Confidence Filter)", now);
+        }
+      } else {
+        handleMissingFrame("No landmarks detected", now);
+      }
     };
 
-    animationFrameRef.current = requestAnimationFrame(loop);
+    const supportsRVFC = typeof video.requestVideoFrameCallback === "function";
+    let active = true;
+
+    const onVideoFrame = (_now: number, metadata: VideoFrameMetadataLike) => {
+      if (!active) return;
+      recordCameraDiagnostics();
+      handTrackingService.processFrame(video, metadata.presentationTime, handleInferenceResult);
+      videoFrameHandleRef.current = video.requestVideoFrameCallback!(onVideoFrame);
+    };
+
+    if (supportsRVFC) {
+      videoFrameHandleRef.current = video.requestVideoFrameCallback!(onVideoFrame);
+    }
+
+    // Display-rate loop (60-120Hz) drives smooth 1 Euro sub-frame interpolation independently of camera FPS
+    const displayLoop = () => {
+      const now = performance.now();
+
+      if (!supportsRVFC && video.readyState >= 2 && video.videoWidth > 0 && video.videoHeight > 0) {
+        recordCameraDiagnostics();
+        if (video.currentTime !== lastVideoTimeRef.current) {
+          lastVideoTimeRef.current = video.currentTime;
+          handTrackingService.processFrame(video, now, handleInferenceResult);
+        }
+      }
+
+      if (lastValidState.current) {
+        if (isInPersistenceRef.current && now - lastDetectedTime.current >= InteractionConfig.trackingPersistenceMs) {
+          handleMissingFrame("Persistence timeout", now);
+        } else if (!isInPersistenceRef.current) {
+          const sampled = pointerSmoothing.current.sample(now);
+          if (sampled) {
+            const interpolatedState: HandState = {
+              ...lastValidState.current,
+              pointer: sampled,
+            };
+            lastValidState.current = interpolatedState;
+            const aspectRatio =
+              video.videoWidth > 0 && video.videoHeight > 0
+                ? video.videoWidth / video.videoHeight
+                : 16 / 9;
+            const gState = gestureRecognizer.current.process(interpolatedState, now, aspectRatio);
+            publishFrame(interpolatedState, gState);
+          }
+        }
+      }
+
+      animationFrameRef.current = requestAnimationFrame(displayLoop);
+    };
+
+    animationFrameRef.current = requestAnimationFrame(displayLoop);
 
     return () => {
+      active = false;
       if (animationFrameRef.current) {
         cancelAnimationFrame(animationFrameRef.current);
+      }
+      if (supportsRVFC && videoFrameHandleRef.current !== null && typeof video.cancelVideoFrameCallback === "function") {
+        video.cancelVideoFrameCallback(videoFrameHandleRef.current);
       }
     };
   }, [isReady, camera, publishFrame]);

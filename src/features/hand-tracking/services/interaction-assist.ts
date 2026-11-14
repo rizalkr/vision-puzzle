@@ -29,11 +29,10 @@ export class InteractionAssistService {
   
   // Generic target registry
   private targets = new Map<string, HTMLElement>();
-  private rectCache = new Map<string, { rect: DOMRect; logicalRect: DOMRect; updatedAt: number }>();
-  private readonly RECT_CACHE_TTL_MS = 100;
   
-  // Hysteresis for hovering
-  private hoverState = new Map<string, { startTime: number; lastSeenTime: number }>();
+  // Grace period when pointer briefly slips out of all targets (prevents 500ms timer reset on micro-jitter)
+  private lastHoveredTarget: { id: string; lastSeenTime: number } | null = null;
+  private readonly DROPOUT_TOLERANCE_MS = 120;
 
   // Diagnostic state for Spatial Debug Overlay
   private lastHitTest: HitTestEvaluation | null = null;
@@ -52,44 +51,22 @@ export class InteractionAssistService {
 
   registerTarget(id: string, element: HTMLElement) {
     this.targets.set(id, element);
-    this.rectCache.delete(id);
   }
 
   unregisterTarget(id: string) {
     this.targets.delete(id);
-    this.rectCache.delete(id);
-    this.hoverState.delete(id);
+    if (this.lastHoveredTarget?.id === id) {
+      this.lastHoveredTarget = null;
+    }
   }
 
   updateContext(getBoardRect: () => DOMRect | null, difficulty: PuzzleDifficulty) {
     this.getBoardRect = getBoardRect;
     this.difficulty = difficulty;
-    this.rectCache.clear();
+    this.lastHoveredTarget = null;
   }
 
-  private getLogicalRect(id: string, element: HTMLElement, now: number): { rect: DOMRect; logicalRect: DOMRect } {
-    const cached = this.rectCache.get(id);
-    if (cached && now - cached.updatedAt < this.RECT_CACHE_TTL_MS) {
-      return cached;
-    }
-
-    const rect = element.getBoundingClientRect();
-    const scale = InteractionConfig.logicalHitboxScale;
-    const wInset = (rect.width * (1 - scale)) / 2;
-    const hInset = (rect.height * (1 - scale)) / 2;
-    const logicalRect = new DOMRect(
-      rect.left + wInset,
-      rect.top + hInset,
-      rect.width * scale,
-      rect.height * scale
-    );
-
-    const entry = { rect, logicalRect, updatedAt: now };
-    this.rectCache.set(id, entry);
-    return entry;
-  }
-
-  // Smart Hit Tester using deterministic bounding boxes
+  // Smart Hit Tester using live deterministic bounding boxes
   hitTest(x: number, y: number): string | undefined {
     const px = x * window.innerWidth;
     const py = y * window.innerHeight;
@@ -105,8 +82,17 @@ export class InteractionAssistService {
       browserTargetId: null,
     };
 
+    const scale = InteractionConfig.logicalHitboxScale;
     for (const [id, element] of this.targets.entries()) {
-      const { rect, logicalRect } = this.getLogicalRect(id, element, now);
+      const rect = element.getBoundingClientRect();
+      const wInset = (rect.width * (1 - scale)) / 2;
+      const hInset = (rect.height * (1 - scale)) / 2;
+      const logicalRect = new DOMRect(
+        rect.left + wInset,
+        rect.top + hInset,
+        rect.width * scale,
+        rect.height * scale
+      );
       
       const inside = (px >= logicalRect.left && px <= logicalRect.right && py >= logicalRect.top && py <= logicalRect.bottom);
       
@@ -117,39 +103,28 @@ export class InteractionAssistService {
         break;
       }
     }
-    
+
     if (candidateId) {
-      const existing = this.hoverState.get(candidateId);
-      if (existing) {
-        existing.lastSeenTime = now;
-      } else {
-        this.hoverState.set(candidateId, { startTime: now, lastSeenTime: now });
-      }
-    }
-
-    // Clean up expired hover states and determine the stable candidate
-    let bestCandidate: string | undefined;
-    let maxLastSeen = 0;
-
-    for (const [id, state] of this.hoverState.entries()) {
-      if (now - state.lastSeenTime > 150) { // 150ms dropout tolerance
-        this.hoverState.delete(id);
-      } else {
-        if (state.lastSeenTime >= maxLastSeen && now - state.startTime > 100) {
-          bestCandidate = id;
-          maxLastSeen = state.lastSeenTime;
-        }
-      }
-    }
-
-    if (bestCandidate) {
-      evaluation.chosenId = bestCandidate;
+      // Switch immediately to the piece under the pointer (never lag behind on a previously hovered piece)
+      this.lastHoveredTarget = { id: candidateId, lastSeenTime: now };
+      evaluation.chosenId = candidateId;
       this.lastHitTest = evaluation;
-      return bestCandidate;
+      return candidateId;
     }
-    
+
+    // Brief dropout tolerance only when cursor temporarily falls outside all targets
+    if (
+      this.lastHoveredTarget &&
+      this.targets.has(this.lastHoveredTarget.id) &&
+      now - this.lastHoveredTarget.lastSeenTime <= this.DROPOUT_TOLERANCE_MS
+    ) {
+      evaluation.chosenId = this.lastHoveredTarget.id;
+      this.lastHitTest = evaluation;
+      return this.lastHoveredTarget.id;
+    }
+
+    this.lastHoveredTarget = null;
     this.lastHitTest = evaluation;
-    
     return undefined;
   }
 
