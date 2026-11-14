@@ -18,7 +18,7 @@ interface UseUnifiedDragProps {
 }
 
 export function useUnifiedDrag({ boardRef, onDrop }: UseUnifiedDragProps) {
-  const { pointerState } = useGlobalPointer();
+  const { pointerState, getPointerState } = useGlobalPointer();
   
   const [dragState, setDragState] = useState<DragState>({
     isDragging: false,
@@ -135,9 +135,10 @@ export function useUnifiedDrag({ boardRef, onDrop }: UseUnifiedDragProps) {
     
     // Direct call for the new interaction dispatcher
     forcePointerUp: useCallback(() => {
-      const clientX = pointerState.x * window.innerWidth;
-      const clientY = pointerState.y * window.innerHeight;
+      const state = getPointerState();
+      const clientX = state.x * window.innerWidth;
+      const clientY = state.y * window.innerHeight;
       handlePointerUp(clientX, clientY);
-    }, [handlePointerUp, pointerState.x, pointerState.y])
+    }, [handlePointerUp, getPointerState])
   };
 }

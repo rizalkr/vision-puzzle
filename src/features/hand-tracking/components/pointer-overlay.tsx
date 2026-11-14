@@ -9,21 +9,46 @@ import { FpsTracker } from "../services/fps-tracker";
 import { motionPresets, motionTokens } from "@/lib/motion";
 
 interface TrailPoint {
-  id: number;
   x: number;
   y: number;
   timestamp: number;
 }
 
+const TRAIL_POOL_SIZE = 6;
+const TRAIL_MAX_AGE_MS = 120;
+const TRAIL_INDICES = Array.from({ length: TRAIL_POOL_SIZE }, (_, i) => i);
+
 export function PointerOverlay() {
   const { handState } = useHandTracking();
-  const { pointerState } = useGlobalPointer();
-  const [trail, setTrail] = useState<TrailPoint[]>([]);
-  const [ripple, setRipple] = useState<{ id: number, x: number, y: number } | null>(null);
+  const { pointerState, subscribePointer, getPointerState } = useGlobalPointer();
+  const [ripple, setRipple] = useState<{ id: number; x: number; y: number } | null>(null);
 
   const renderFpsTracker = useRef(new FpsTracker());
+  const pointerContainerRef = useRef<HTMLDivElement | null>(null);
+  const trailRefs = useRef<(HTMLDivElement | null)[]>([]);
+  const trailPointsRef = useRef<TrailPoint[]>([]);
 
-  // Track Render FPS
+  // Update pointer transform immediately on high-frequency pointer ticks (zero React re-renders)
+  useEffect(() => {
+    const applyTransform = (x: number, y: number) => {
+      const el = pointerContainerRef.current;
+      if (!el) return;
+      const px = x * window.innerWidth;
+      const py = y * window.innerHeight;
+      el.style.transform = `translate3d(${px}px, ${py}px, 0)`;
+    };
+
+    const current = getPointerState();
+    applyTransform(current.x, current.y);
+
+    return subscribePointer((state) => {
+      if (state.source === "hand" && state.phase !== "hidden") {
+        applyTransform(state.x, state.y);
+      }
+    });
+  }, [subscribePointer, getPointerState, handState.detected, pointerState.phase]);
+
+  // Track Render FPS and drive GPU-composited trail pool
   useEffect(() => {
     let animationFrameId: number;
     
@@ -36,6 +61,43 @@ export function PointerOverlay() {
           useHandTrackingDiagnostics.getState().setRenderFps(metrics);
         }
       }
+
+      const current = getPointerState();
+      if (current.source === "hand" && current.phase !== "hidden") {
+        const px = current.x * window.innerWidth;
+        const py = current.y * window.innerHeight;
+
+        const points = trailPointsRef.current.filter(
+          (p) => timestamp - p.timestamp < TRAIL_MAX_AGE_MS
+        );
+        points.push({ x: px, y: py, timestamp });
+        if (points.length > TRAIL_POOL_SIZE) {
+          points.splice(0, points.length - TRAIL_POOL_SIZE);
+        }
+        trailPointsRef.current = points;
+
+        const isGrab = current.phase === "pressed" || current.phase === "dragging";
+        const baseOpacity = isGrab ? 0.8 : 0.5;
+
+        for (let i = 0; i < TRAIL_POOL_SIZE; i++) {
+          const el = trailRefs.current[i];
+          if (!el) continue;
+          const pt = points[i];
+          if (pt) {
+            const ratio = (i + 1) / points.length;
+            el.style.transform = `translate3d(${pt.x}px, ${pt.y}px, 0)`;
+            el.style.opacity = String(ratio * baseOpacity);
+          } else {
+            el.style.opacity = "0";
+          }
+        }
+      } else if (trailPointsRef.current.length > 0) {
+        trailPointsRef.current = [];
+        for (let i = 0; i < TRAIL_POOL_SIZE; i++) {
+          const el = trailRefs.current[i];
+          if (el) el.style.opacity = "0";
+        }
+      }
       
       animationFrameId = requestAnimationFrame(renderLoop);
     };
@@ -45,7 +107,7 @@ export function PointerOverlay() {
     return () => {
       cancelAnimationFrame(animationFrameId);
     };
-  }, []);
+  }, [getPointerState]);
 
   // Manage global cursor hiding
   useEffect(() => {
@@ -56,42 +118,23 @@ export function PointerOverlay() {
     }
   }, [pointerState.source]);
 
-  // Keep a motion trail
-  useEffect(() => {
-    if (pointerState.phase !== "hidden" && pointerState.source === "hand") {
-      // eslint-disable-next-line react-hooks/set-state-in-effect
-      setTrail((prev) => {
-        const now = Date.now();
-        const filtered = prev.filter((p) => now - p.timestamp < 120);
-        return [
-          ...filtered,
-          { id: now, x: pointerState.x, y: pointerState.y, timestamp: now },
-        ];
-      });
-    } else {
-      setTrail([]);
-    }
-  }, [pointerState.x, pointerState.y, pointerState.phase, pointerState.source]);
-
   const wasPressed = useRef(false);
-  // Handle Drop Ripple
+  // Handle Drop Ripple on discrete phase release
   useEffect(() => {
     if (pointerState.phase === "pressed" || pointerState.phase === "dragging") {
       wasPressed.current = true;
     } else if (wasPressed.current && (pointerState.phase === "idle" || pointerState.phase === "hover")) {
       wasPressed.current = false;
+      const latest = getPointerState();
       setRipple({
         id: Date.now(),
-        x: pointerState.x,
-        y: pointerState.y
+        x: latest.x,
+        y: latest.y
       });
     }
-  }, [pointerState.phase, pointerState.x, pointerState.y]);
+  }, [pointerState.phase, getPointerState]);
 
   if (pointerState.phase === "hidden") return null;
-
-  const displayX = pointerState.x;
-  const displayY = pointerState.y;
 
   const cursorState = pointerState.phase === "pressed" || pointerState.phase === "dragging" ? "grab" :
                       pointerState.phase === "hover" ? "hover" : "idle";
@@ -101,32 +144,22 @@ export function PointerOverlay() {
       <AnimatePresence>
         {handState.detected && (
           <>
-            {/* Trail */}
-            {trail.map((point, index) => {
-              const opacity = (index + 1) / trail.length; // Fade out older points
-              return (
-                <div
-                  key={point.id}
-                  className="absolute rounded-full bg-cyan-200/40 blur-[2px] w-4 h-4 -ml-2 -mt-2 pointer-events-none"
-                  style={{
-                    left: `${point.x * 100}%`,
-                    top: `${point.y * 100}%`,
-                    opacity: opacity * (cursorState === "grab" ? 0.8 : 0.5),
-                  }}
-                />
-              );
-            })}
+            {/* Trail Pool (GPU-composited via transform) */}
+            {TRAIL_INDICES.map((index) => (
+              <div
+                key={index}
+                ref={(el) => {
+                  trailRefs.current[index] = el;
+                }}
+                className="absolute top-0 left-0 rounded-full bg-cyan-200/40 blur-[2px] w-4 h-4 -ml-2 -mt-2 pointer-events-none will-change-transform"
+                style={{ opacity: 0 }}
+              />
+            ))}
 
-            {/* Pointer overlay no longer renders the connection line here. 
-                The puzzle pieces will handle their own locked connections or we can rely on standard dragging visual. */}
-
-            {/* Main Pointer */}
+            {/* Main Pointer (GPU-composited via transform) */}
             <div
-              className="absolute pointer-events-none z-50"
-              style={{
-                left: `${displayX * 100}%`,
-                top: `${displayY * 100}%`,
-              }}
+              ref={pointerContainerRef}
+              className="absolute top-0 left-0 pointer-events-none z-50 will-change-transform"
             >
               <motion.div
                 initial="hidden"

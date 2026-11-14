@@ -16,7 +16,7 @@ interface PuzzlePieceProps {
   isHovered: boolean;
   isSelected: boolean;
   isSwapTarget: boolean;
-  hoverProgress: number;
+  isAutoSelecting: boolean;
   onPointerDown: (pieceId: string, clientX: number, clientY: number) => void;
 }
 
@@ -28,7 +28,7 @@ export const PuzzlePiece = React.memo(function PuzzlePiece({
   isHovered,
   isSelected,
   isSwapTarget,
-  hoverProgress,
+  isAutoSelecting,
   onPointerDown,
 }: PuzzlePieceProps) {
   const setPieceRef = React.useCallback((node: HTMLDivElement | null) => {
@@ -109,9 +109,9 @@ export const PuzzlePiece = React.memo(function PuzzlePiece({
       {!piece.isLocked && (
         <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 flex items-center justify-center pointer-events-none">
           {/* Progress Ring */}
-          {!isSelected && !isSwapTarget && hoverProgress > 0 && (
+          {!isSelected && !isSwapTarget && isAutoSelecting && (
             <svg className="absolute w-8 h-8 -rotate-90">
-              <circle
+              <motion.circle
                 cx="16"
                 cy="16"
                 r="14"
@@ -119,7 +119,9 @@ export const PuzzlePiece = React.memo(function PuzzlePiece({
                 strokeWidth="2"
                 fill="none"
                 strokeDasharray="88"
-                strokeDashoffset={88 - (88 * hoverProgress)}
+                initial={{ strokeDashoffset: 88 }}
+                animate={{ strokeDashoffset: 0 }}
+                transition={{ duration: 0.5, ease: "linear" }}
                 strokeLinecap="round"
               />
             </svg>

@@ -31,6 +31,9 @@ export interface RegisteredSurface {
 interface GlobalPointerContextValue {
   pointerState: PointerState;
   setPointerState: React.Dispatch<React.SetStateAction<PointerState>>;
+  publishPointerState: (updater: React.SetStateAction<PointerState>) => void;
+  subscribePointer: (listener: (state: PointerState) => void) => () => void;
+  getPointerState: () => PointerState;
   registerSurface: (surface: RegisteredSurface) => void;
   unregisterSurface: (id: string) => void;
   getSurfaces: () => RegisteredSurface[];
@@ -39,20 +42,54 @@ interface GlobalPointerContextValue {
 const GlobalPointerContext = createContext<GlobalPointerContextValue | null>(null);
 
 export function GlobalPointerProvider({ children }: { children: React.ReactNode }) {
-  const [pointerState, setPointerState] = useState<PointerState>({
+  const initialPointer: PointerState = {
     x: 0.5,
     y: 0.5,
     phase: "hidden",
     source: "mouse",
     hoveredSurfaceId: null,
-  });
+  };
 
-  const setPointerStateWithLogging = useCallback((updater: React.SetStateAction<PointerState>) => {
-    setPointerState((prev) => {
-      const next = typeof updater === "function" ? updater(prev) : updater;
-      return next;
-    });
+  const [pointerState, setPointerState] = useState<PointerState>(initialPointer);
+  const pointerRef = useRef<PointerState>(initialPointer);
+  const committedRef = useRef<PointerState>(initialPointer);
+  const listenersRef = useRef<Set<(state: PointerState) => void>>(new Set());
+
+  const publishPointerState = useCallback((updater: React.SetStateAction<PointerState>) => {
+    const prev = pointerRef.current;
+    const next = typeof updater === "function" ? updater(prev) : updater;
+    if (
+      next.x === prev.x &&
+      next.y === prev.y &&
+      next.phase === prev.phase &&
+      next.source === prev.source &&
+      next.hoveredSurfaceId === prev.hoveredSurfaceId
+    ) {
+      return;
+    }
+
+    pointerRef.current = next;
+    listenersRef.current.forEach((listener) => listener(next));
+
+    const committed = committedRef.current;
+    if (
+      next.phase !== committed.phase ||
+      next.source !== committed.source ||
+      next.hoveredSurfaceId !== committed.hoveredSurfaceId
+    ) {
+      committedRef.current = next;
+      setPointerState(next);
+    }
   }, []);
+
+  const subscribePointer = useCallback((listener: (state: PointerState) => void) => {
+    listenersRef.current.add(listener);
+    return () => {
+      listenersRef.current.delete(listener);
+    };
+  }, []);
+
+  const getPointerState = useCallback(() => pointerRef.current, []);
 
   const surfacesRef = useRef<Map<string, RegisteredSurface>>(new Map());
 
@@ -71,7 +108,7 @@ export function GlobalPointerProvider({ children }: { children: React.ReactNode 
   // Listen for native mouse movement to switch input source and update position
   useEffect(() => {
     const handleMouseMove = (e: MouseEvent) => {
-      setPointerStateWithLogging((prev) => {
+      publishPointerState((prev) => {
         return {
           ...prev,
           x: e.clientX / window.innerWidth,
@@ -83,11 +120,11 @@ export function GlobalPointerProvider({ children }: { children: React.ReactNode 
     };
 
     const handleMouseDown = () => {
-      setPointerStateWithLogging((prev) => prev.source === "mouse" ? { ...prev, phase: "pressed" } : prev);
+      publishPointerState((prev) => prev.source === "mouse" ? { ...prev, phase: "pressed" } : prev);
     };
 
     const handleMouseUp = () => {
-      setPointerStateWithLogging((prev) => prev.source === "mouse" ? { ...prev, phase: "hover" } : prev);
+      publishPointerState((prev) => prev.source === "mouse" ? { ...prev, phase: "hover" } : prev);
     };
 
     window.addEventListener("mousemove", handleMouseMove);
@@ -99,18 +136,24 @@ export function GlobalPointerProvider({ children }: { children: React.ReactNode 
       window.removeEventListener("mousedown", handleMouseDown);
       window.removeEventListener("mouseup", handleMouseUp);
     };
-  }, [setPointerStateWithLogging]);
+  }, [publishPointerState]);
+
+  const contextValue = React.useMemo(
+    () => ({
+      pointerState,
+      setPointerState: publishPointerState,
+      publishPointerState,
+      subscribePointer,
+      getPointerState,
+      registerSurface,
+      unregisterSurface,
+      getSurfaces,
+    }),
+    [pointerState, publishPointerState, subscribePointer, getPointerState, registerSurface, unregisterSurface, getSurfaces]
+  );
 
   return (
-    <GlobalPointerContext.Provider
-      value={{
-        pointerState,
-        setPointerState: setPointerStateWithLogging,
-        registerSurface,
-        unregisterSurface,
-        getSurfaces,
-      }}
-    >
+    <GlobalPointerContext.Provider value={contextValue}>
       {children}
     </GlobalPointerContext.Provider>
   );

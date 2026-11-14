@@ -29,6 +29,8 @@ export class InteractionAssistService {
   
   // Generic target registry
   private targets = new Map<string, HTMLElement>();
+  private rectCache = new Map<string, { rect: DOMRect; logicalRect: DOMRect; updatedAt: number }>();
+  private readonly RECT_CACHE_TTL_MS = 100;
   
   // Hysteresis for hovering
   private hoverState = new Map<string, { startTime: number; lastSeenTime: number }>();
@@ -50,22 +52,48 @@ export class InteractionAssistService {
 
   registerTarget(id: string, element: HTMLElement) {
     this.targets.set(id, element);
+    this.rectCache.delete(id);
   }
 
   unregisterTarget(id: string) {
     this.targets.delete(id);
+    this.rectCache.delete(id);
     this.hoverState.delete(id);
   }
 
   updateContext(getBoardRect: () => DOMRect | null, difficulty: PuzzleDifficulty) {
     this.getBoardRect = getBoardRect;
     this.difficulty = difficulty;
+    this.rectCache.clear();
+  }
+
+  private getLogicalRect(id: string, element: HTMLElement, now: number): { rect: DOMRect; logicalRect: DOMRect } {
+    const cached = this.rectCache.get(id);
+    if (cached && now - cached.updatedAt < this.RECT_CACHE_TTL_MS) {
+      return cached;
+    }
+
+    const rect = element.getBoundingClientRect();
+    const scale = InteractionConfig.logicalHitboxScale;
+    const wInset = (rect.width * (1 - scale)) / 2;
+    const hInset = (rect.height * (1 - scale)) / 2;
+    const logicalRect = new DOMRect(
+      rect.left + wInset,
+      rect.top + hInset,
+      rect.width * scale,
+      rect.height * scale
+    );
+
+    const entry = { rect, logicalRect, updatedAt: now };
+    this.rectCache.set(id, entry);
+    return entry;
   }
 
   // Smart Hit Tester using deterministic bounding boxes
   hitTest(x: number, y: number): string | undefined {
     const px = x * window.innerWidth;
     const py = y * window.innerHeight;
+    const now = performance.now();
 
     let candidateId: string | undefined = undefined;
     
@@ -77,43 +105,18 @@ export class InteractionAssistService {
       browserTargetId: null,
     };
 
-    // Calculate Browser Ground Truth
-    if (typeof document !== 'undefined') {
-      const browserTarget = document.elementFromPoint(px, py);
-      if (browserTarget) {
-        const pieceIdAttr = browserTarget.closest('[data-piece-id]')?.getAttribute('data-piece-id');
-        if (pieceIdAttr) {
-          evaluation.browserTargetId = pieceIdAttr;
-        }
-      }
-    }
-
-
     for (const [id, element] of this.targets.entries()) {
-      const rect = element.getBoundingClientRect();
-      
-      const scale = InteractionConfig.logicalHitboxScale;
-      const wInset = (rect.width * (1 - scale)) / 2;
-      const hInset = (rect.height * (1 - scale)) / 2;
-      
-      const logicalRect = new DOMRect(
-        rect.left + wInset,
-        rect.top + hInset,
-        rect.width * scale,
-        rect.height * scale
-      );
+      const { rect, logicalRect } = this.getLogicalRect(id, element, now);
       
       const inside = (px >= logicalRect.left && px <= logicalRect.right && py >= logicalRect.top && py <= logicalRect.bottom);
       
       evaluation.candidates.push({ pieceId: id, inside, rect, logicalRect });
       
-      if (inside && !candidateId) {
+      if (inside) {
         candidateId = id;
-        // Do not break here because we want to evaluate all candidates for the debug overlay
+        break;
       }
     }
-
-    const now = performance.now();
     
     if (candidateId) {
       const existing = this.hoverState.get(candidateId);

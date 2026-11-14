@@ -22,57 +22,54 @@ export function PuzzleBoard({ pieces, sourceImage, difficulty }: PuzzleBoardProp
   const isComplete = usePuzzleStore((state) => state.isComplete);
   const selectedPieceId = usePuzzleStore((state) => state.selectedPieceId);
   const handlePieceSelection = usePuzzleStore((state) => state.handlePieceSelection);
-  const { registerSurface, unregisterSurface, pointerState } = useGlobalPointer();
-  const pointerStateRef = React.useRef(pointerState);
+  const { registerSurface, unregisterSurface, pointerState, subscribePointer, getPointerState } = useGlobalPointer();
   const selectedPieceIdRef = React.useRef(selectedPieceId);
   
   React.useEffect(() => {
-    pointerStateRef.current = pointerState;
     selectedPieceIdRef.current = selectedPieceId;
-  }, [pointerState, selectedPieceId]);
+  }, [selectedPieceId]);
 
-  const [hoverProgress, setHoverProgress] = React.useState(0);
+  const [hoveredPieceId, setHoveredPieceId] = React.useState<string | null>(null);
 
-  // Compute hovered piece ID directly based on global pointer state
-  // But only if we are not dragging, and only if pointer is over the board (approx)
-  // Actually, interactionAssist handles it perfectly.
-  const hoveredPieceId = React.useMemo(() => {
-    if (isComplete || pointerState.phase === "hidden" || pieces.length === 0) return null;
-    return interactionAssist.hitTest(pointerState.x, pointerState.y);
-  }, [pointerState.x, pointerState.y, pointerState.phase, isComplete, pieces]);
-
-  // 500ms Auto-Select Timer for Hand Tracking
+  // Evaluate hovered piece via high-frequency pointer subscription and only commit when ID changes
   React.useEffect(() => {
-    if (pointerState.source !== "hand" || selectedPieceId !== null || !hoveredPieceId || isComplete) {
+    if (isComplete || pieces.length === 0) {
       // eslint-disable-next-line react-hooks/set-state-in-effect
-      setHoverProgress(0);
+      setHoveredPieceId(null);
       return;
     }
 
-    const start = performance.now();
-    let frameId: number;
-    const duration = 500;
-
-    const tick = (now: number) => {
-      const elapsed = now - start;
-      const progress = Math.min(elapsed / duration, 1);
-      
-      setHoverProgress(progress);
-      
-      if (progress < 1) {
-        frameId = requestAnimationFrame(tick);
-      } else {
-        handlePieceSelection(hoveredPieceId);
-        setHoverProgress(0);
+    const evaluateHover = (state: { x: number; y: number; phase: string }) => {
+      if (state.phase === "hidden") {
+        setHoveredPieceId((prev) => (prev === null ? prev : null));
+        return;
       }
+      const nextHovered = interactionAssist.hitTest(state.x, state.y) ?? null;
+      setHoveredPieceId((prev) => (prev === nextHovered ? prev : nextHovered));
     };
-    
-    frameId = requestAnimationFrame(tick);
-    
+
+    evaluateHover(getPointerState());
+    return subscribePointer(evaluateHover);
+  }, [isComplete, pieces.length, subscribePointer, getPointerState]);
+
+  const isAutoSelecting =
+    pointerState.source === "hand" &&
+    selectedPieceId === null &&
+    hoveredPieceId !== null &&
+    !isComplete;
+
+  // 500ms Auto-Select Timer for Hand Tracking (no per-frame React state updates)
+  React.useEffect(() => {
+    if (!isAutoSelecting || !hoveredPieceId) return;
+
+    const timer = window.setTimeout(() => {
+      handlePieceSelection(hoveredPieceId);
+    }, 500);
+
     return () => {
-      cancelAnimationFrame(frameId);
+      window.clearTimeout(timer);
     };
-  }, [hoveredPieceId, selectedPieceId, pointerState.source, isComplete, handlePieceSelection]);
+  }, [isAutoSelecting, hoveredPieceId, handlePieceSelection]);
 
   const handleDrop = React.useCallback(
     (pieceId: string, clientX: number, clientY: number) => {
@@ -122,7 +119,7 @@ export function PuzzleBoard({ pieces, sourceImage, difficulty }: PuzzleBoardProp
         magnetic: false,
         callbacks: {
            onPress: (x?: number, y?: number) => {
-             const state = pointerStateRef.current;
+             const state = getPointerState();
              const currentSelectedId = selectedPieceIdRef.current;
              
              // Use exact pointer coordinates at the moment of pinch if provided (H1 Fix)
@@ -146,7 +143,7 @@ export function PuzzleBoard({ pieces, sourceImage, difficulty }: PuzzleBoardProp
     }
 
     return () => unregisterSurface("puzzle-board");
-  }, [difficulty, pieces, registerSurface, unregisterSurface, handlePieceSelection, forcePointerUp]);
+  }, [difficulty, pieces, registerSurface, unregisterSurface, handlePieceSelection, forcePointerUp, getPointerState]);
 
   if (!sourceImage) return null;
 
@@ -217,7 +214,7 @@ export function PuzzleBoard({ pieces, sourceImage, difficulty }: PuzzleBoardProp
             isHovered={hoveredPieceId === piece.id}
             isSelected={selectedPieceId === piece.id}
             isSwapTarget={selectedPieceId !== null && selectedPieceId !== piece.id && hoveredPieceId === piece.id}
-            hoverProgress={hoveredPieceId === piece.id ? hoverProgress : 0}
+            isAutoSelecting={isAutoSelecting && hoveredPieceId === piece.id}
             onPointerDown={handlePointerDown}
           />
         ))}
